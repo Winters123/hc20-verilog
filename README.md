@@ -23,7 +23,7 @@ The PHV is defined as:
   > * highest `2b` is the opcode: `00` for `>`, `01` for `>=` and `10` for `==`
   > * the next `1b` is the immediate flag: `1` for immediate, `0` means the value needs to be retrieved from PHV.
   > * the next `8b` represents immediate or the way to retrieve the value from PHV.
-  > * the lowest 9b represents the 2nd operator.
+  > * the lowest 9b represents the 2nd operand.
 
 * `256b`: the metadata attached to the packet.
 
@@ -51,7 +51,7 @@ Lookup Engine takes the key generated from Key Extractor, conducts a matching op
 
 * Format of the lookup table entry
 
-  each entry consists from one 896b entry and one 896b mask to support ternary match. 
+  each entry consists of one 896b entry and one 896b mask to support ternary match. 
 
   For example: entry1: `10011001...1001` mask1:  `111111111...1000` would avoid the match of the lowest 3 bits.
 
@@ -69,7 +69,7 @@ Lookup Engine takes the key generated from Key Extractor, conducts a matching op
 
 Action Engine takes the `action` output from Lookup Engine, and modifies PHV according to it. The actions that will be supported in the demo include `add`, `addi`, `sub`, `subi`, `load` and `store`.
 
-![image-20200820133044892](image-20200820133044892.png)
+![image-20200820231101945](image-20200820231101945.png)
 
 1. `add`: takes two operands from the PHV based on the indexes in the action field, add them, and write the result back to the location of 1st operand.
 2. `addi` takes one operand from PHV based on the index in the action field and one operand from the action field directly, add them, and write the result back to the location of operand. 
