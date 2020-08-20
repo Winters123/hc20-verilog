@@ -1,96 +1,89 @@
-# README #
+### Design notes
 
-THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE SOFTWARE CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+![image-20200820141944925](image-20200820141944925.png)
 
-This repository contains the FlowBlaze prototype for NetFPGA SUME, as described in the NSDI'19 paper.
-It should be understood that this prototype is not production ready and
-therefore it is provided AS IS, with the user taking full responsibility
-for its use. Furthermore, it should be understood that this prototype is provided 
-mainly to foster scientific collaboration and ensure the reproducibility
-of the research results.
+#### Packet Header Vector
 
-As reported in the paper, this prototype uses statecally defined parser, action and match tables.
-This also means that the number of pipeline elements is fixed.
-We already provide sources for pipelines comprising 1, 2 and 5 elements. It should be relatively easy to extend such sources to an arbitrary 
-number of elements.
+basically, the packet header vector needs to contain **packet header**, **metadata** (ingress port, length, etc.) and also the **instruction**. The instruction defines **how to select the fields we extracted from the header and how to do with them** (put them into a MAT key? feed them into the comparator?)
 
-The prototype is composed by two parts:
+The PHV is defined as:
 
-1. The hardware project providing the stateful programmable dataplane
-2. The firmware project providing the agent able to configure the stateful programmable with the network functions 
-compiled using the XL toolchain. 
+```|1024b|7b|24x8b|nx20b|256b|```
 
-However, it should be noted that our prototype supports a relatively small number of packet header actions. Common use cases should not be affected by that.
+![image-20200820031746369](image-20200820031746369.png)
 
-The prototype has been developed with the Vivado 2016.4 version. We strongly suggest to use the same version.
+* `1024b`: the first 1024b in the packet;
 
-# How to build FlowBlaze #
+* `7b`: totally length of the header;
 
-1) Install the NetFPGA SUME development environment following the information available at https://github.com/NetFPGA/NetFPGA-SUME-public/wiki
+* `24x8b`: we support 24 different fields at most. They are divided into 3 groups. The 1st, 2nd and 3rd groups are used to locate the fields in 2B, 4B, 8B respectively (each group can hold 8 different fields at most). In each `8b`, the highest bit is the valid bit, the low `7b` is the offset in the first `1024b` of the PHV.
 
-2) Clone the FlowBlaze repo and go into the NetFPGA-SUME-FB folder 
+* `nx20b`: comparator sub-instruction in each stage (suppose there are 5 stages at this point).  
 
-3) source the relevant environmet variables:
+  > * highest `2b` is the opcode: `00` for `>`, `01` for `>=` and `10` for `==`
+  > * the next `1b` is the immediate flag: `1` for immediate, `0` means the value needs to be retrieved from PHV.
+  > * the next `8b` represents immediate or the way to retrieve the value from PHV.
+  > * the lowest 9b represents the 2nd operator.
 
-```shell
-$ source $SUME_FOLDER/tools/settings.sh
-$ source $XILINX_PATH/settings64.sh
-$ source $XILINX_SDK/settings64.sh
-```
+* `256b`: the metadata attached to the packet.
 
-4) recreate the vivado project with the command:
+---
 
-```shell
-make project
-```
+#### Key Extractor
 
-5) create a bitstream with the command:
+Key Extractor is used to generate the key according to PHV.  meanwhile, in order to support `if-else` statement, Key Extractor module also set the value of the `conditional flag` according to the `nx20b` fields to determine if the match-action should be executed in the current stage.
 
-```shell
-make hw
-```
+* Key extraction:
 
-This command will create the bitfile flowblaze.bit
+  The key is extracted from the packet header based on the offsets in the `24x8b` field. the values extracted from the packet header will be stacked together to form a key. Be noted that if the valid tag of one specific field is `0`, the corresponding position in the key still needs to be retained to avoid dependency between those different fields.
 
-6) create the firmware project with the command:
+* Comparation:
 
-```shell
-make firmware
-```
+  In stage `M`, the 2 operands and the operator in `M`-th will be extracted and fed in to the comparator. If the result is `1`, the flag to the lookup table would be set, meaning the key will be matched in the lookup engine. Otherwise, the lookup engine would be bypassed and the action field will be set to `0` (meaning do nothing in the stage).
 
+---
 
-7) create the firmware executable with the command:
+#### Lookup engine
 
-```shell
-make compile
-```
+Lookup Engine takes the key generated from Key Extractor, conducts a matching operation and outputs an `action` which determines the actions that need to execute in the Action Engine.
 
-This command will create an executable named flowblaze.elf
+![image-20200820112809091](image-20200820112809091.png)
 
-# Install FlowBlaze #
+* Format of the lookup table entry
 
-After building the FlowBlaze bitstream and the firmware executable, run the following command to install it on the NetFPGA:
+  each entry consists from one 896b entry and one 896b mask to support ternary match. 
 
+  For example: entry1: `10011001...1001` mask1:  `111111111...1000` would avoid the match of the lowest 3 bits.
 
-```shell
-$ xsdb
-```
-```shell
-xsdb% fpga -f top.bit; dow app.elf; 
-```
+* Lookup elements
 
-If your host is connected to the NetFPGA also with the serial port, you can get access to the debug interface of 
-FlowBlaze connecting to the serial port over USB, using the following command:
+  Lookup Engine consists of 2 lookup elements, each of which is 512b wide and has 8 entries. 
 
+* Control plane
 
-```shell
-$ sudo minicom -D /dev/ttyUSB1 
-```
+  both lookup table entry and action ram are configured using AXI-Lite. 
 
-To download a network function into the FlowBlaze prototype follows the instructions in the XL-toolchain folder.
+---
 
-# CONTACTS #
+#### Action Engine
 
-This repository is mantained by [axbryd](http://axbryd.com/). 
-If you have any question or you need support for using and extending the prototype please send an
-email to [info@axbryd.com](mailto:info@axbryd.com).
+Action Engine takes the `action` output from Lookup Engine, and modifies PHV according to it. The actions that will be supported in the demo include `add`, `addi`, `sub`, `subi`, `load` and `store`.
+
+![image-20200820133044892](image-20200820133044892.png)
+
+1. `add`: takes two operands from the PHV based on the indexes in the action field, add them, and write the result back to the location of 1st operand.
+2. `addi` takes one operand from PHV based on the index in the action field and one operand from the action field directly, add them, and write the result back to the location of operand. 
+3. `sub`: takes two operands from the PHV based on the indexes in the action field, substract the 2nd operand from the 1st, and write the result back to the location of 1st operand.
+4. `subi`: takes one operand from the PHV based on the index in the action field and one from the action field directly, substract the 2nd operand from the 1st, and write the result back to the location of 1st operand.
+5. `load`: read the value according to the address stored in the action field, write it into PHV according to the index in the action field.
+6. `store`: read the value from PHV according to the index in the action field, write it into the address stored in the action field.
+
+* Action format:
+
+  For `add` (`0b'0001`) and `sub` (`0b'0010`)operations, the action format is:
+
+  ![image-20200820125159102](image-20200820125159102.png)
+
+  For `addi`(`0b'0011`), `subi`(`0b'0100`), `load`(`0b'0101`) and `store`(`0b'0110`), the action format is:
+
+  ![image-20200820141447045](image-20200820141447045.png)
